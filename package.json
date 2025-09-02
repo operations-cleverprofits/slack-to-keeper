@@ -1,5 +1,5 @@
 {
-  "name": "slack-keeper-integration",
+  "name": "slack-to-keeper",
   "version": "1.0.0",
   "description": "Slack -> Keeper task creator",
   "main": "index.js",
