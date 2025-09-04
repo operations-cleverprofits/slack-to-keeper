@@ -290,14 +290,48 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     await createTask(clientId, assigneeId, title, finalDescription, dueDate);
 
-// --- Confirmation (always DM) ---
-await client.chat.postMessage({
-  channel: body.user.id,
-  text: `✅ Task created in Keeper (clientId: ${clientId}).`,
+    // --- Confirmation (always attempt ephemeral; safe DM fallback) ---
+    try {
+      const pm = JSON.parse(view.private_metadata || "{}");
+
+      // Prefer the original channel; if missing, open a DM to get a channel id
+      let channelId = pm?.channel;
+      if (!channelId) {
+        const im = await client.conversations.open({ users: body.user.id });
+        channelId = im?.channel?.id;
+      }
+
+      if (channelId) {
+        try {
+          await client.chat.postEphemeral({
+            channel: channelId,
+            user: body.user.id,
+            text: `✅ Task created in Keeper (clientId: ${clientId}).`,
+          });
+        } catch (ephemeralErr) {
+          // If ephemeral isn't allowed in this conversation, fall back to a normal DM
+          try {
+            await client.chat.postMessage({
+              channel: channelId,
+              text: `✅ Task created in Keeper (clientId: ${clientId}).`,
+            });
+          } catch (dmErr) {
+            console.error("DM fallback error:", dmErr?.data || dmErr?.message || dmErr);
+          }
+        }
+      }
+    } catch (ackErr) {
+      console.error("Ack/ephemeral error:", ackErr?.data || ackErr?.message || ackErr);
+    }
+    // -----------------------------------------------------------------
+  } catch (err) {
+    console.error("Error creating task in Keeper:", err?.data || err?.message || err);
+  }
 });
 
 const port = process.env.PORT || 3000;
 receiver.app.listen(port, () => {
   console.log(`🚀 App running on port ${port}`);
 });
+
 
