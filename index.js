@@ -32,6 +32,39 @@ async function preloadClients() {
 preloadClients();
 setInterval(preloadClients, 30 * 60 * 1000);
 
+/** ---------- Helpers ---------- */
+// Reemplaza <@UXXXX> por @Display Name
+async function expandMentionsToNames(text, client) {
+  if (!text) return text;
+  const re = /<@([A-Z0-9]+)>/g;
+  const ids = new Set();
+  let m;
+  while ((m = re.exec(text))) ids.add(m[1]);
+  if (!ids.size) return text;
+
+  const cache = new Map();
+  for (const id of ids) {
+    try {
+      const { user } = await client.users.info({ user: id });
+      const name =
+        user?.profile?.display_name ||
+        user?.real_name ||
+        user?.name ||
+        id;
+      cache.set(id, name);
+    } catch {
+      cache.set(id, id);
+    }
+  }
+
+  let out = text;
+  for (const [id, name] of cache.entries()) {
+    const token = new RegExp(`<@${id}>`, "g");
+    out = out.replace(token, `@${name}`);
+  }
+  return out;
+}
+
 /** ---------- Opciones del external_select (client_action) ---------- */
 slackApp.options("client_action", async (ctx) => {
   const { ack } = ctx;
@@ -55,9 +88,7 @@ slackApp.options("client_action", async (ctx) => {
 
     await ack({ options });
   } catch {
-    try {
-      await ack({ options: [] });
-    } catch {}
+    try { await ack({ options: [] }); } catch {}
   }
 });
 
@@ -66,16 +97,37 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
 
   const users = await getUsers();
+
   const initialMsg =
     shortcut?.message?.text ||
     shortcut?.message?.blocks?.[0]?.text?.text ||
     "";
+
+  // Obtener permalink + guardar metadatos para el submit
+  const channelId =
+    shortcut?.channel?.id ||
+    shortcut?.message?.channel ||
+    shortcut?.channel_id ||
+    "";
+  const message_ts = shortcut?.message?.ts;
+  const teamId = shortcut?.team?.id || shortcut?.user?.team_id || "";
+
+  let permalink = "";
+  try {
+    if (channelId && message_ts) {
+      const r = await client.chat.getPermalink({ channel: channelId, message_ts });
+      permalink = r?.permalink || "";
+    }
+  } catch (e) {
+    console.warn("No pude obtener permalink:", e?.data?.error || e?.message);
+  }
 
   await client.views.open({
     trigger_id: shortcut.trigger_id,
     view: {
       type: "modal",
       callback_id: "create_keeper_task",
+      private_metadata: JSON.stringify({ permalink, channelId, message_ts, teamId }),
       title: { type: "plain_text", text: "Send to Keeper" },
       submit: { type: "plain_text", text: "Create Task" },
       close: { type: "plain_text", text: "Cancel" },
@@ -153,20 +205,47 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     const title =
       view.state.values.task_title_block.task_title_action.value;
-    const description =
+    let descriptionRaw =
       view.state.values.description_block.description_action.value;
-
     const dueDate =
       view.state.values.due_date_block?.due_date_action?.selected_date;
 
+    // Expandir menciones <@U…> -> @Nombre
+    descriptionRaw = await expandMentionsToNames(descriptionRaw, client);
+
+    // Recuperar metadatos y asegurar permalink
+    let meta = {};
+    try { meta = JSON.parse(body.view?.private_metadata || "{}"); } catch {}
+    let { permalink, channelId, message_ts, teamId } = meta;
+
+    if (!permalink && channelId && message_ts) {
+      try {
+        const r = await client.chat.getPermalink({ channel: channelId, message_ts });
+        permalink = r?.permalink || "";
+      } catch {
+        // Fallback: link al cliente de Slack (no requiere domain)
+        const tsCompact = String(message_ts || "").replace(".", "");
+        if (teamId && channelId && tsCompact) {
+          permalink = `https://app.slack.com/client/${teamId}/${channelId}/p${tsCompact}`;
+        }
+      }
+    }
+
+    const description = permalink
+      ? `${(descriptionRaw || "").trim()}\n\n🔗 Slack message: ${permalink}`
+      : descriptionRaw;
+
     await createTask(clientId, assigneeId, title, description, dueDate);
 
+    // Aviso ephemeral si hay channelId
     try {
-      await client.chat.postEphemeral({
-        channel: body.view?.private_metadata || body.user?.team_id,
-        user: body.user.id,
-        text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
-      });
+      if (channelId) {
+        await client.chat.postEphemeral({
+          channel: channelId,
+          user: body.user.id,
+          text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
+        });
+      }
     } catch {}
   } catch (err) {
     console.error("Error creando task en Keeper:", err?.message || err);
