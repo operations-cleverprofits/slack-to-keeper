@@ -1,7 +1,7 @@
 // index.js
 require("dotenv").config();
 const { App, ExpressReceiver } = require("@slack/bolt");
-const { getAllClients, getUsers, createTask, getClients } = require("./keeper");
+const { getAllClients, getUsers, createTask } = require("./keeper");
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -102,13 +102,25 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             })),
           },
         },
+        // NUEVO: título obligatorio en blanco
         {
           type: "input",
-          block_id: "message_block",
-          label: { type: "plain_text", text: "Task Description" },
+          block_id: "task_title_block",
+          label: { type: "plain_text", text: "Task Title" },
           element: {
             type: "plain_text_input",
-            action_id: "message_action",
+            action_id: "task_title_action",
+            initial_value: "", // vacío pero requerido por ser input no-optional
+          },
+        },
+        // NUEVO: descripción auto-llenada con el mensaje de Slack
+        {
+          type: "input",
+          block_id: "description_block",
+          label: { type: "plain_text", text: "Description" },
+          element: {
+            type: "plain_text_input",
+            action_id: "description_action",
             multiline: true,
             initial_value: initialMsg,
           },
@@ -133,12 +145,22 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
 slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
   await ack();
   try {
-    const clientId = view.state.values.client_block.client_action.selected_option.value;
-    const assigneeId = view.state.values.assignee_block.assignee_action.selected_option.value;
-    const message = view.state.values.message_block.message_action.value;
-    const dueDate = view.state.values.due_date_block?.due_date_action?.selected_date;
+    const clientId =
+      view.state.values.client_block.client_action.selected_option.value;
+    const assigneeId =
+      view.state.values.assignee_block.assignee_action.selected_option.value;
 
-    await createTask(clientId, assigneeId, message, dueDate);
+    // NUEVO: leer título y descripción
+    const title =
+      view.state.values.task_title_block.task_title_action.value;
+    const description =
+      view.state.values.description_block.description_action.value;
+
+    const dueDate =
+      view.state.values.due_date_block?.due_date_action?.selected_date;
+
+    // NUEVO: enviar título y descripción por separado
+    await createTask(clientId, assigneeId, title, description, dueDate);
 
     // aviso al usuario (ephemeral); puede fallar si no hay canal
     try {
@@ -157,4 +179,5 @@ const port = process.env.PORT || 3000;
 receiver.app.listen(port, () => {
   console.log(`🚀 App running on port ${port}`);
 });
+
 
