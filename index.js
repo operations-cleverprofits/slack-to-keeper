@@ -9,21 +9,46 @@ const receiver = new ExpressReceiver({
 });
 
 // Healthchecks
-receiver.app.get("/", (_req, res) => res.status(200).send("OK - Slack Keeper Integration"));
-receiver.app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
+receiver.app.get("/", (_req, res) =>
+  res.status(200).send("OK - Slack Keeper Integration")
+);
+receiver.app.get("/health", (_req, res) =>
+  res.status(200).json({ ok: true })
+);
 
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
   receiver,
 });
 
-/** ---------- Utils ---------- */
-// Convierte <@U123|...> a @Display Name para mostrar bonito en el modal
-async function expandUserMentionsToNames(text, client) {
-  if (!text) return "";
-  const regex = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
-  const ids = [...new Set([...text.matchAll(regex)].map(m => m[1]))];
-  if (ids.length === 0) return text;
+/** ========= Utils: normalización de texto ========= **/
+
+// 1) Entidades HTML
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+// 2) Links de Slack: <url|Etiqueta> -> "Etiqueta (url)" ; <url> -> "url"
+function convertSlackLinks(s) {
+  return String(s || "")
+    .replace(/<([^|>\s]+)\|([^>]+)>/g, "$2 ($1)")
+    .replace(/<([^|>]+)>/g, "$1");
+}
+
+// 3) Menciones: soporta <@UXXXX> y @UXXXX (sin < >)
+async function expandSlackMentions(text, client) {
+  const raw = String(text || "");
+
+  const idsAngle = [...raw.matchAll(/<@([UW][A-Z0-9]+)>/g)].map(m => m[1]);
+  const idsAt    = [...raw.matchAll(/(?<![A-Za-z0-9._%+-])@([UW][A-Z0-9]{8,})\b/g)].map(m => m[1]);
+  const ids = Array.from(new Set([...idsAngle, ...idsAt]));
+  if (!ids.length) return raw;
 
   const nameById = {};
   for (const id of ids) {
@@ -37,18 +62,60 @@ async function expandUserMentionsToNames(text, client) {
         info?.user?.name ||
         id;
       nameById[id] = `@${name}`;
-    } catch { /* ignore */ }
+    } catch {
+      nameById[id] = `@${id}`;
+    }
   }
-  return text.replace(regex, (_m, id) => nameById[id] || `@${id}`);
+
+  let out = raw;
+  out = out.replace(/<@([UW][A-Z0-9]+)>/g, (_m, id) => nameById[id] || `@${id}`);
+  out = out.replace(/(?<![A-Za-z0-9._%+-])@([UW][A-Z0-9]{8,})\b/g, (_m, id) => nameById[id] || `@${id}`);
+  return out;
 }
 
-// Limpia otras menciones <#C|name>, <!here>, etc.
-function tidyOtherMentions(text) {
-  return String(text || "")
+// 4) Otros tipos de menciones
+function convertOtherMentions(s) {
+  return String(s || "")
     .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, (_m, _id, name) => `#${name}`)
     .replace(/<!here>/g, "@here")
     .replace(/<!channel>/g, "@channel")
     .replace(/<!everyone>/g, "@everyone");
+}
+
+// 5) Quitar formato (*_~`> etc.)
+function stripFormatting(s) {
+  let t = String(s || "");
+  // citas al inicio de línea ( > y &gt; )
+  t = t.replace(/(^|\n)\s*(?:>|&gt;)\s?/g, "$1");
+  // **negrita** o *negrita*
+  t = t.replace(/\*\*(.*?)\*\*/g, "$1").replace(/\*(.*?)\*/g, "$1");
+  // __negrita__ o _cursiva_
+  t = t.replace(/__(.*?)__/g, "$1").replace(/_(.*?)_/g, "$1");
+  // ~tachado~
+  t = t.replace(/~(.*?)~/g, "$1");
+  // `codigo` y ```bloques```
+  t = t.replace(/```([\s\S]*?)```/g, "$1").replace(/`([^`]*)`/g, "$1");
+  return t;
+}
+
+// 6) Espaciado
+function normalizeWhitespace(s) {
+  return String(s || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Pipeline completo
+async function toPlainText(text, client) {
+  let s = decodeEntities(text);
+  s = convertSlackLinks(s);
+  s = await expandSlackMentions(s, client);
+  s = convertOtherMentions(s);
+  s = stripFormatting(s);
+  s = normalizeWhitespace(s);
+  return s;
 }
 
 /** ---------- Precarga de clientes (caché) ---------- */
@@ -95,28 +162,31 @@ slackApp.options("client_action", async (ctx) => {
 slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
 
-  const users = await getUsers();
-
-  const rawMsg =
+  const original =
     shortcut?.message?.text ||
     shortcut?.message?.blocks?.[0]?.text?.text ||
     "";
 
-  // Expandir menciones a @Nombre para el modal
-  const prettyMsg = tidyOtherMentions(await expandUserMentionsToNames(rawMsg, client));
+  // Texto limpio y con menciones expandidas para el modal
+  const initialMsg = await toPlainText(original, client);
+
+  // Guardamos canal y ts para poder construir el permalink luego
+  const privateMeta = JSON.stringify({
+    channel: shortcut?.channel?.id || shortcut?.channel,
+    ts: shortcut?.message?.ts,
+  });
+
+  const users = await getUsers();
 
   await client.views.open({
     trigger_id: shortcut.trigger_id,
     view: {
       type: "modal",
       callback_id: "create_keeper_task",
+      private_metadata: privateMeta,
       title: { type: "plain_text", text: "Send to Keeper" },
       submit: { type: "plain_text", text: "Create Task" },
       close: { type: "plain_text", text: "Cancel" },
-      private_metadata: JSON.stringify({
-        channel: shortcut?.channel?.id || shortcut?.channel?.id,
-        ts: shortcut?.message?.ts,
-      }),
       blocks: [
         {
           type: "input",
@@ -161,7 +231,7 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             type: "plain_text_input",
             action_id: "description_action",
             multiline: true,
-            initial_value: prettyMsg,
+            initial_value: initialMsg,
           },
         },
         {
@@ -192,38 +262,49 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
     const title =
       view.state.values.task_title_block.task_title_action.value;
 
-    const rawDesc =
+    let description =
       view.state.values.description_block.description_action.value;
-
-    const prettyDesc = tidyOtherMentions(await expandUserMentionsToNames(rawDesc, client));
-
-    // Añadir link del mensaje original al final (sin :link:)
-    let finalDesc = prettyDesc;
-    try {
-      const meta = JSON.parse(body.view?.private_metadata || "{}");
-      if (meta.channel && meta.ts) {
-        const { permalink } = await client.chat.getPermalink({
-          channel: meta.channel,
-          message_ts: meta.ts,
-        });
-        if (permalink) {
-          finalDesc += `\n\nSlack message: ${permalink}`;
-        }
-      }
-    } catch { /* ignore */ }
 
     const dueDate =
       view.state.values.due_date_block?.due_date_action?.selected_date;
 
-    await createTask(clientId, assigneeId, title, finalDesc, dueDate);
+    // Re-limpiar por si el usuario editó con formato
+    description = await toPlainText(description, client);
 
+    // Añadir permalink del mensaje original al final
+    let permalink = "";
+    let meta = {};
     try {
-      await client.chat.postEphemeral({
-        channel: body.user?.id,
-        user: body.user.id,
-        text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
-      });
-    } catch {}
+      meta = JSON.parse(view.private_metadata || "{}");
+      if (meta?.channel && meta?.ts) {
+        const pl = await client.chat.getPermalink({
+          channel: meta.channel,
+          message_ts: meta.ts,
+        });
+        permalink = pl?.permalink;
+      }
+    } catch { /* noop */ }
+
+    const finalDescription =
+      permalink ? `${description}\n\nSlack message: ${permalink}` : description;
+
+    await createTask(clientId, assigneeId, title, finalDescription, dueDate);
+
+    // Confirmación al usuario (ephemeral en el canal original; fallback DM)
+    try {
+      if (meta?.channel) {
+        await client.chat.postEphemeral({
+          channel: meta.channel,
+          user: body.user.id,
+          text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
+        });
+      } else {
+        await client.chat.postMessage({
+          channel: body.user.id,
+          text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
+        });
+      }
+    } catch { /* noop */ }
   } catch (err) {
     console.error("Error creando task en Keeper:", err?.message || err);
   }
