@@ -5,7 +5,8 @@ const BASE_URL =
   process.env.KEEPER_API_BASE ||
   process.env.KEEPER_BASE_URL ||
   "https://api.keeper.app";
-const OAUTH_URL = process.env.KEEPER_OAUTH_URL || `${BASE_URL}/oauth/token`;
+const OAUTH_URL =
+  process.env.KEEPER_OAUTH_URL || `${BASE_URL}/oauth/token`;
 const CLIENT_ID = process.env.KEEPER_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEEPER_CLIENT_SECRET;
 
@@ -51,19 +52,7 @@ async function apiPost(path, body) {
   return data;
 }
 
-async function apiPatch(path, body) {
-  const token = await getToken();
-  const { data } = await axios.patch(`${BASE_URL}${path}`, body, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-  });
-  return data;
-}
-
-// ---- Helper normalizers
+// ---- Helpers to normalize API responses
 function pickList(resp) {
   return Array.isArray(resp)
     ? resp
@@ -83,17 +72,17 @@ function mapClient(c) {
   };
 }
 
-// === Search (max 100)
+// === Search (max 100) for external_select ===
 async function getClients(search) {
   const params = new URLSearchParams();
   params.set("limit", 100);
   if (search) params.set("search", search);
 
   const resp = await apiGet(`/api/clients/summary?${params.toString()}`);
-  return pickList(resp).map(mapClient).filter((c) => c.id && c.name);
+  return pickList(resp).map(mapClient).filter(c => c.id && c.name);
 }
 
-// === Fetch all (precache)
+// === Fetch ALL with flexible pagination (for local cache) ===
 async function getAllClients() {
   const limit = 100;
   const aggregated = [];
@@ -107,7 +96,7 @@ async function getAllClients() {
     params.set("limit", limit);
 
     if (usePage) {
-      const pageIdx = cursor + 1;
+      const pageIdx = cursor + 1; // 1-based
       params.set("page", pageIdx);
       params.set("pageNumber", pageIdx);
       params.set("pageSize", limit);
@@ -157,43 +146,34 @@ async function getUsers() {
 }
 
 /**
- * Creates a Keeper task and stores the description in multiple fields
- * for maximum UI compatibility.
+ * Create a task in Keeper with separate title and description.
+ * - title -> taskName (<=255)
+ * - description -> sent in description/subText/notes for max UI compatibility
  */
 async function createTask(clientId, assigneeId, title, description, dueDate) {
   const rawTitle = String(title || "").trim();
   const rawDesc  = String(description || "").trim();
+
   const fallbackTitle =
     rawDesc.split(/\r?\n/)[0]?.slice(0, 255) || "Task from Slack";
 
-  // NOTE: backend field name is `subText` (capital T)
   const body = {
     clientId: Number(clientId),
     taskName: (rawTitle || fallbackTitle).slice(0, 255),
+
+    // Send description in multiple fields used by different tenants/UIs
     description: rawDesc || undefined,
     subText: rawDesc || undefined,
     notes: rawDesc || undefined,
+
     assignedTo: assigneeId ? Number(assigneeId) : undefined,
     priority: false,
     dueDate: dueDate || undefined,
   };
+
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
 
-  const created = await apiPost(`/api/non-closing-tasks`, body);
-
-  // Fallback: ensure subText got persisted
-  if (rawDesc) {
-    const taskId = created?.id || created?.taskId || created?.data?.id;
-    if (taskId) {
-      try {
-        await apiPatch(`/api/non-closing-tasks/${taskId}`, { subText: rawDesc });
-      } catch {
-        /* noop */
-      }
-    }
-  }
-
-  return created;
+  return apiPost(`/api/non-closing-tasks`, body);
 }
 
 module.exports = {
