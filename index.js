@@ -18,7 +18,7 @@ const slackApp = new App({
 });
 
 /** ---------- Utils ---------- */
-// Convierte <@U123|...> a @Display Name para mostrar bonito en el modal (y opcionalmente en Keeper)
+// Convierte <@U123|...> a @Display Name para mostrar bonito en el modal
 async function expandUserMentionsToNames(text, client) {
   if (!text) return "";
   const regex = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
@@ -42,7 +42,7 @@ async function expandUserMentionsToNames(text, client) {
   return text.replace(regex, (_m, id) => nameById[id] || `@${id}`);
 }
 
-// Convierte <#C123|canal> a #canal y <!here> etc. a @here (opcional, por estética)
+// Limpia otras menciones <#C|name>, <!here>, etc.
 function tidyOtherMentions(text) {
   return String(text || "")
     .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, (_m, _id, name) => `#${name}`)
@@ -95,16 +95,14 @@ slackApp.options("client_action", async (ctx) => {
 slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
 
-  // Usuarios para el dropdown
   const users = await getUsers();
 
-  // Texto original del mensaje de Slack
   const rawMsg =
     shortcut?.message?.text ||
     shortcut?.message?.blocks?.[0]?.text?.text ||
     "";
 
-  // ⇩⇩ NUEVO: expandir menciones a @Nombre SOLO para mostrar en el modal
+  // Expandir menciones a @Nombre para el modal
   const prettyMsg = tidyOtherMentions(await expandUserMentionsToNames(rawMsg, client));
 
   await client.views.open({
@@ -163,7 +161,7 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             type: "plain_text_input",
             action_id: "description_action",
             multiline: true,
-            initial_value: prettyMsg, // ← ya con @Nombre
+            initial_value: prettyMsg,
           },
         },
         {
@@ -194,14 +192,12 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
     const title =
       view.state.values.task_title_block.task_title_action.value;
 
-    // Descripción que escribe la persona (podría tener menciones nuevas)
     const rawDesc =
       view.state.values.description_block.description_action.value;
 
-    // Bonito con nombres para Keeper
     const prettyDesc = tidyOtherMentions(await expandUserMentionsToNames(rawDesc, client));
 
-    // Añadir link del mensaje original al final (solo para Keeper)
+    // Añadir link del mensaje original al final (sin :link:)
     let finalDesc = prettyDesc;
     try {
       const meta = JSON.parse(body.view?.private_metadata || "{}");
@@ -211,7 +207,7 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
           message_ts: meta.ts,
         });
         if (permalink) {
-          finalDesc += `\n\n:link: Slack message: ${permalink}`;
+          finalDesc += `\n\nSlack message: ${permalink}`;
         }
       }
     } catch { /* ignore */ }
@@ -223,7 +219,7 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     try {
       await client.chat.postEphemeral({
-        channel: body.user?.id, // si no hay canal del mensaje, mandar al usuario
+        channel: body.user?.id,
         user: body.user.id,
         text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
       });
