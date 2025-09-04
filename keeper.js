@@ -63,7 +63,7 @@ async function apiPatch(path, body) {
   return data;
 }
 
-// ---- Normalizadores auxiliares
+// ---- Helper normalizers
 function pickList(resp) {
   return Array.isArray(resp)
     ? resp
@@ -83,7 +83,7 @@ function mapClient(c) {
   };
 }
 
-// === Buscar (máx 100)
+// === Search (max 100)
 async function getClients(search) {
   const params = new URLSearchParams();
   params.set("limit", 100);
@@ -93,7 +93,7 @@ async function getClients(search) {
   return pickList(resp).map(mapClient).filter((c) => c.id && c.name);
 }
 
-// === Traer todos (precache)
+// === Fetch all (precache)
 async function getAllClients() {
   const limit = 100;
   const aggregated = [];
@@ -157,8 +157,8 @@ async function getUsers() {
 }
 
 /**
- * Crea una tarea en Keeper y guarda la descripción en varios campos
- * para máxima compatibilidad visual.
+ * Creates a Keeper task and stores the description in multiple fields
+ * for maximum UI compatibility.
  */
 async function createTask(clientId, assigneeId, title, description, dueDate) {
   const rawTitle = String(title || "").trim();
@@ -166,7 +166,7 @@ async function createTask(clientId, assigneeId, title, description, dueDate) {
   const fallbackTitle =
     rawDesc.split(/\r?\n/)[0]?.slice(0, 255) || "Task from Slack";
 
-  // OJO: el campo del backend es `subText` (T mayúscula)
+  // NOTE: backend field name is `subText` (capital T)
   const body = {
     clientId: Number(clientId),
     taskName: (rawTitle || fallbackTitle).slice(0, 255),
@@ -181,7 +181,7 @@ async function createTask(clientId, assigneeId, title, description, dueDate) {
 
   const created = await apiPost(`/api/non-closing-tasks`, body);
 
-  // Fallback: asegurar que subText quedó escrito
+  // Fallback: ensure subText got persisted
   if (rawDesc) {
     const taskId = created?.id || created?.taskId || created?.data?.id;
     if (taskId) {
