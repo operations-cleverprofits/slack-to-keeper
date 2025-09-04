@@ -158,11 +158,11 @@ async function getUsers() {
   return list.map((u) => ({ id: u.id, name: u.name }));
 }
 
-async function createTask(clientId, assigneeId, message, dueDate) {
+async function createTask(clientId, assigneeId, title, description, dueDate) {
   const body = {
     clientId: Number(clientId),
-    taskName: String(message).slice(0, 255),
-    subtext: String(message),
+    taskName: String(title || "").slice(0, 255),   // título corto (Keeper lo limita)
+    subtext: description ? String(description) : undefined, // descripción completa
     assignedTo: assigneeId ? Number(assigneeId) : undefined,
     priority: false,
     dueDate: dueDate || undefined,
