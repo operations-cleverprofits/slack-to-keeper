@@ -92,7 +92,6 @@ async function getAllClients() {
   let usePage = false;
 
   while (true) {
-    // ⚠️ usar let y crear un params nuevo por iteración
     let params = new URLSearchParams();
     params.set("limit", limit);
 
@@ -111,7 +110,6 @@ async function getAllClients() {
     try {
       resp = await apiGet(`/api/clients/summary?${params.toString()}`);
     } catch (e) {
-      // si falla con skip/offset, intenta paginación por página
       if (!usePage) {
         usePage = true;
         continue;
@@ -158,22 +156,42 @@ async function getUsers() {
   return list.map((u) => ({ id: u.id, name: u.name }));
 }
 
+/**
+ * Crea una tarea en Keeper con título y descripción separados.
+ * - title: va a taskName (<=255)
+ * - description: se envía en description y subtext (y notes) para máxima compatibilidad visual
+ */
 async function createTask(clientId, assigneeId, title, description, dueDate) {
+  const rawTitle = String(title || "").trim();
+  const rawDesc  = String(description || "").trim();
+
+  // Si no hay título, toma la primera línea de la descripción
+  const fallbackTitle =
+    rawDesc.split(/\r?\n/)[0]?.slice(0, 255) || "Task from Slack";
+
   const body = {
     clientId: Number(clientId),
-    taskName: String(title || "").slice(0, 255),   // título corto (Keeper lo limita)
-    subtext: description ? String(description) : undefined, // descripción completa
+    taskName: (rawTitle || fallbackTitle).slice(0, 255),
+
+    // Enviar la descripción en varios campos usados por distintos tenants/UIs
+    description: rawDesc || undefined,
+    subtext: rawDesc || undefined,
+    notes: rawDesc || undefined,
+
     assignedTo: assigneeId ? Number(assigneeId) : undefined,
     priority: false,
     dueDate: dueDate || undefined,
   };
+
+  // Limpia undefined
   Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
+
   return apiPost(`/api/non-closing-tasks`, body);
 }
 
 module.exports = {
   getClients,
-  getAllClients, // <-- exportado para precargar todo
+  getAllClients,
   getUsers,
   createTask,
 };
