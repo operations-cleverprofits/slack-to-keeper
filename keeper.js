@@ -157,7 +157,8 @@ async function getUsers() {
 }
 
 /**
- * Crea una tarea en Keeper y guarda la descripción en `subText`.
+ * Crea una tarea en Keeper y guarda la descripción en varios campos
+ * para máxima compatibilidad visual.
  */
 async function createTask(clientId, assigneeId, title, description, dueDate) {
   const rawTitle = String(title || "").trim();
@@ -165,11 +166,13 @@ async function createTask(clientId, assigneeId, title, description, dueDate) {
   const fallbackTitle =
     rawDesc.split(/\r?\n/)[0]?.slice(0, 255) || "Task from Slack";
 
-  // IMPORTANTE: usar `subText` (T mayúscula)
+  // OJO: el campo del backend es `subText` (T mayúscula)
   const body = {
     clientId: Number(clientId),
     taskName: (rawTitle || fallbackTitle).slice(0, 255),
+    description: rawDesc || undefined,
     subText: rawDesc || undefined,
+    notes: rawDesc || undefined,
     assignedTo: assigneeId ? Number(assigneeId) : undefined,
     priority: false,
     dueDate: dueDate || undefined,
@@ -178,14 +181,14 @@ async function createTask(clientId, assigneeId, title, description, dueDate) {
 
   const created = await apiPost(`/api/non-closing-tasks`, body);
 
-  // Si por alguna razón no quedó, intenta actualizar sólo subText.
+  // Fallback: asegurar que subText quedó escrito
   if (rawDesc) {
     const taskId = created?.id || created?.taskId || created?.data?.id;
     if (taskId) {
       try {
         await apiPatch(`/api/non-closing-tasks/${taskId}`, { subText: rawDesc });
-      } catch (e) {
-        // silencio: no debe romper el flujo
+      } catch {
+        /* noop */
       }
     }
   }
@@ -199,4 +202,5 @@ module.exports = {
   getUsers,
   createTask,
 };
+
 
