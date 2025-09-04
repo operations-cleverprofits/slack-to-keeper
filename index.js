@@ -50,42 +50,31 @@ async function expandSlackMentions(text, client) {
   const ids = Array.from(new Set([...idsAngle, ...idsAt]));
   if (!ids.length) return raw;
 
-  const nameById = {};
+  const names = {};
   for (const id of ids) {
     try {
       const info = await client.users.info({ user: id });
-      const prof = info?.user?.profile || {};
-      const name =
-        prof.display_name_normalized ||
-        prof.display_name ||
+      const nm =
+        info?.user?.profile?.display_name ||
         info?.user?.real_name ||
         info?.user?.name ||
         id;
-      nameById[id] = `@${name}`;
+      names[id] = `@${nm}`;
     } catch {
-      nameById[id] = `@${id}`;
+      names[id] = `@${id}`;
     }
   }
 
   let out = raw;
-  out = out.replace(/<@([UW][A-Z0-9]+)>/g, (_m, id) => nameById[id] || `@${id}`);
-  out = out.replace(/(?<![A-Za-z0-9._%+-])@([UW][A-Z0-9]{8,})\b/g, (_m, id) => nameById[id] || `@${id}`);
+  out = out.replace(/<@([UW][A-Z0-9]+)>/g, (_, id) => names[id] || `@${id}`);
+  out = out.replace(/(?<![A-Za-z0-9._%+-])@([UW][A-Z0-9]{8,})\b/g, (_, id) => names[id] || `@${id}`);
   return out;
 }
 
-// 4) Other mention types
-function convertOtherMentions(s) {
-  return String(s || "")
-    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, (_m, _id, name) => `#${name}`)
-    .replace(/<!here>/g, "@here")
-    .replace(/<!channel>/g, "@channel")
-    .replace(/<!everyone>/g, "@everyone");
-}
-
-// 5) Remove inline formatting (* _ ~ ` > etc.)
+// 4) Remove inline formatting (* _ ~ ` > etc.)
 function stripFormatting(s) {
   let t = String(s || "");
-  // quotes at the beginning of lines ( > and &gt; )
+  // block quotes at the beginning of lines ( > and &gt; )
   t = t.replace(/(^|\n)\s*(?:>|&gt;)\s?/g, "$1");
   // **bold** or *bold*
   t = t.replace(/\*\*(.*?)\*\*/g, "$1").replace(/\*(.*?)\*/g, "$1");
@@ -98,7 +87,7 @@ function stripFormatting(s) {
   return t;
 }
 
-// 6) Whitespace
+// 5) Whitespace
 function normalizeWhitespace(s) {
   return String(s || "")
     .replace(/\r\n/g, "\n")
@@ -107,15 +96,25 @@ function normalizeWhitespace(s) {
     .trim();
 }
 
-// Full pipeline
+// Full pipeline to plain text
 async function toPlainText(text, client) {
   let s = decodeEntities(text);
   s = convertSlackLinks(s);
   s = await expandSlackMentions(s, client);
-  s = convertOtherMentions(s);
   s = stripFormatting(s);
   s = normalizeWhitespace(s);
   return s;
+}
+
+// DM helper (always DM the user)
+async function notifyUserDM(client, userId, text) {
+  try {
+    const im = await client.conversations.open({ users: userId });
+    const channelId = im?.channel?.id || userId;
+    await client.chat.postMessage({ channel: channelId, text });
+  } catch (e) {
+    console.error("Failed to send DM:", e?.data || e?.message || e);
+  }
 }
 
 /** ---------- Client preload (cache) ---------- */
@@ -159,6 +158,7 @@ slackApp.options("client_action", async (ctx) => {
 });
 
 /** ---------- Shortcut: open modal ---------- */
+// If this workspace uses a different shortcut callback_id, update it here.
 slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
 
@@ -167,13 +167,13 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
     shortcut?.message?.blocks?.[0]?.text?.text ||
     "";
 
-  // Clean text with expanded mentions for the modal
+  // Clean text (expanded mentions, plain text) for the modal
   const initialMsg = await toPlainText(original, client);
 
   // Save channel and ts to build a permalink later
   const privateMeta = JSON.stringify({
-    channel: shortcut?.channel?.id || shortcut?.channel,
-    ts: shortcut?.message?.ts,
+    channel: shortcut.channel?.id || shortcut.channel,
+    ts: shortcut.message?.ts,
   });
 
   const users = await getUsers();
@@ -273,8 +273,9 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     // Append original message permalink
     let permalink = "";
+    let meta = {};
     try {
-      const meta = JSON.parse(view.private_metadata || "{}");
+      meta = JSON.parse(view.private_metadata || "{}");
       if (meta?.channel && meta?.ts) {
         const pl = await client.chat.getPermalink({
           channel: meta.channel,
@@ -288,6 +289,13 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
       permalink ? `${description}\n\nSlack message: ${permalink}` : description;
 
     await createTask(clientId, assigneeId, title, finalDescription, dueDate);
+
+    // Always send DM confirmation
+    await notifyUserDM(
+      client,
+      body.user.id,
+      `✅ Task created in Keeper (clientId: ${clientId}).`
+    );
   } catch (err) {
     console.error("Error creating task in Keeper:", err?.data || err?.message || err);
   }
