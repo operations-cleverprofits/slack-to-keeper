@@ -290,24 +290,10 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     await createTask(clientId, assigneeId, title, finalDescription, dueDate);
 
-    // User confirmation (ephemeral in original channel; DM fallback)
-    try {
-      if (meta?.channel) {
-        await client.chat.postEphemeral({
-          channel: meta.channel,
-          user: body.user.id,
-          text: `✅ Task created in Keeper (clientId: ${clientId}).`,
-        });
-      } else {
-        await client.chat.postMessage({
-          channel: body.user.id,
-          text: `✅ Task created in Keeper (clientId: ${clientId}).`,
-        });
-      }
-    } catch { /* noop */ }
-  } catch (err) {
-    console.error("Error creating task in Keeper:", err?.message || err);
-  }
+// --- Confirmation (always DM) ---
+await client.chat.postMessage({
+  channel: body.user.id,
+  text: `✅ Task created in Keeper (clientId: ${clientId}).`,
 });
 
 const port = process.env.PORT || 3000;
