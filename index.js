@@ -28,7 +28,6 @@ async function preloadClients() {
   }
 }
 preloadClients();
-// refresco periódico
 setInterval(preloadClients, 30 * 60 * 1000);
 
 /** ---------- Opciones del external_select (client_action) ---------- */
@@ -45,7 +44,7 @@ slackApp.options("client_action", async (ctx) => {
 
     const pool = query
       ? cachedClients.filter(c => c.name && c.name.toLowerCase().includes(query))
-      : cachedClients.slice(0, 50); // primeras 50 al abrir sin escribir
+      : cachedClients.slice(0, 50);
 
     const options = pool.slice(0, 100).map(c => ({
       text: { type: "plain_text", text: c.name },
@@ -61,7 +60,7 @@ slackApp.options("client_action", async (ctx) => {
 /** ---------- Shortcut: abre el modal ---------- */
 slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
-  // carga usuarios para el dropdown de asignatario
+
   const users = await getUsers();
   const initialMsg =
     shortcut?.message?.text ||
@@ -102,7 +101,7 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             })),
           },
         },
-        // NUEVO: título obligatorio en blanco
+        // Título requerido (vacío por defecto)
         {
           type: "input",
           block_id: "task_title_block",
@@ -110,10 +109,10 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
           element: {
             type: "plain_text_input",
             action_id: "task_title_action",
-            initial_value: "", // vacío pero requerido por ser input no-optional
+            initial_value: "",
           },
         },
-        // NUEVO: descripción auto-llenada con el mensaje de Slack
+        // Descripción auto-llenada con el mensaje original
         {
           type: "input",
           block_id: "description_block",
@@ -150,7 +149,6 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
     const assigneeId =
       view.state.values.assignee_block.assignee_action.selected_option.value;
 
-    // NUEVO: leer título y descripción
     const title =
       view.state.values.task_title_block.task_title_action.value;
     const description =
@@ -159,10 +157,9 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
     const dueDate =
       view.state.values.due_date_block?.due_date_action?.selected_date;
 
-    // NUEVO: enviar título y descripción por separado
     await createTask(clientId, assigneeId, title, description, dueDate);
 
-    // aviso al usuario (ephemeral); puede fallar si no hay canal
+    // Notificación al usuario (si falla, lo ignoramos)
     try {
       await client.chat.postEphemeral({
         channel: body.view?.private_metadata || body.user?.team_id,
@@ -179,5 +176,6 @@ const port = process.env.PORT || 3000;
 receiver.app.listen(port, () => {
   console.log(`🚀 App running on port ${port}`);
 });
+
 
 
