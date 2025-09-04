@@ -9,7 +9,9 @@ const receiver = new ExpressReceiver({
 });
 
 // Healthchecks
-receiver.app.get("/", (_req, res) => res.status(200).send("OK - Slack Keeper Integration"));
+receiver.app.get("/", (_req, res) =>
+  res.status(200).send("OK - Slack Keeper Integration")
+);
 receiver.app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
 const slackApp = new App({
@@ -35,25 +37,27 @@ slackApp.options("client_action", async (ctx) => {
   const { ack } = ctx;
   try {
     const raw =
-      ctx?.options?.value ??
-      ctx?.payload?.value ??
-      (ctx?.body?.value || "");
+      ctx?.options?.value ?? ctx?.payload?.value ?? (ctx?.body?.value || "");
     const query = String(raw || "").toLowerCase();
 
     if (!cachedClients.length) await preloadClients();
 
     const pool = query
-      ? cachedClients.filter(c => c.name && c.name.toLowerCase().includes(query))
+      ? cachedClients.filter(
+          (c) => c.name && c.name.toLowerCase().includes(query)
+        )
       : cachedClients.slice(0, 50);
 
-    const options = pool.slice(0, 100).map(c => ({
+    const options = pool.slice(0, 100).map((c) => ({
       text: { type: "plain_text", text: c.name },
       value: String(c.id),
     }));
 
     await ack({ options });
   } catch {
-    try { await ack({ options: [] }); } catch {}
+    try {
+      await ack({ options: [] });
+    } catch {}
   }
 });
 
@@ -95,13 +99,12 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             type: "static_select",
             action_id: "assignee_action",
             placeholder: { type: "plain_text", text: "Pick a user" },
-            options: users.slice(0, 100).map(u => ({
+            options: users.slice(0, 100).map((u) => ({
               text: { type: "plain_text", text: u.name },
               value: String(u.id),
             })),
           },
         },
-        // Título requerido (vacío por defecto)
         {
           type: "input",
           block_id: "task_title_block",
@@ -112,7 +115,6 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             initial_value: "",
           },
         },
-        // Descripción auto-llenada con el mensaje original
         {
           type: "input",
           block_id: "description_block",
@@ -149,8 +151,7 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
     const assigneeId =
       view.state.values.assignee_block.assignee_action.selected_option.value;
 
-    const title =
-      view.state.values.task_title_block.task_title_action.value;
+    const title = view.state.values.task_title_block.task_title_action.value;
     const description =
       view.state.values.description_block.description_action.value;
 
@@ -159,7 +160,6 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     await createTask(clientId, assigneeId, title, description, dueDate);
 
-    // Notificación al usuario (si falla, lo ignoramos)
     try {
       await client.chat.postEphemeral({
         channel: body.view?.private_metadata || body.user?.team_id,
@@ -176,6 +176,5 @@ const port = process.env.PORT || 3000;
 receiver.app.listen(port, () => {
   console.log(`🚀 App running on port ${port}`);
 });
-
 
 
