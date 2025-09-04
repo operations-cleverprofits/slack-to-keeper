@@ -5,8 +5,7 @@ const BASE_URL =
   process.env.KEEPER_API_BASE ||
   process.env.KEEPER_BASE_URL ||
   "https://api.keeper.app";
-const OAUTH_URL =
-  process.env.KEEPER_OAUTH_URL || `${BASE_URL}/oauth/token`;
+const OAUTH_URL = process.env.KEEPER_OAUTH_URL || `${BASE_URL}/oauth/token`;
 const CLIENT_ID = process.env.KEEPER_CLIENT_ID;
 const CLIENT_SECRET = process.env.KEEPER_CLIENT_SECRET;
 
@@ -84,17 +83,16 @@ function mapClient(c) {
   };
 }
 
-// === Buscar (máx 100) ===
+// === Buscar (máx 100) para external_select
 async function getClients(search) {
   const params = new URLSearchParams();
   params.set("limit", 100);
   if (search) params.set("search", search);
-
   const resp = await apiGet(`/api/clients/summary?${params.toString()}`);
-  return pickList(resp).map(mapClient).filter(c => c.id && c.name);
+  return pickList(resp).map(mapClient).filter((c) => c.id && c.name);
 }
 
-// === Traer todos para precache ===
+// === Traer todos (precarga con paginación flexible)
 async function getAllClients() {
   const limit = 100;
   const aggregated = [];
@@ -129,24 +127,13 @@ async function getAllClients() {
       throw e;
     }
 
-    const list = Array.isArray(resp)
-      ? resp
-      : resp.items || resp.results || resp.clients || resp.data || [];
-
+    const list = pickList(resp);
     const before = seen.size;
+
     for (const c of list) {
       if (!c?.id || seen.has(c.id)) continue;
       seen.add(c.id);
-      aggregated.push({
-        id: c.id,
-        name:
-          c.name ||
-          c.clientName ||
-          c.title ||
-          c.companyName ||
-          c.client_name ||
-          c.company,
-      });
+      aggregated.push(mapClient(c));
     }
 
     if (list.length < limit) break;
@@ -169,46 +156,81 @@ async function getUsers() {
 }
 
 /**
- * Crea una tarea en Keeper con título y descripción separados.
- * - taskName: título (<=255)
- * - description: se guarda como descripción visible (y redundamos en notes/subtext)
- * Nota: algunos tenants de Keeper solo aceptan descripción vía PATCH,
- * por eso hacemos un PATCH después del POST si hay descripción.
+ * Intenta varias rutas/campos para guardar la descripción.
+ */
+async function tryAttachDescription(taskId, rawDesc) {
+  if (!taskId || !rawDesc) return;
+
+  // 1) PATCH directamente la tarea con "description"
+  try {
+    await apiPatch(`/api/non-closing-tasks/${taskId}`, { description: rawDesc });
+    return;
+  } catch (e) {
+    console.warn("[Keeper] PATCH description falló:", e?.response?.status, e?.response?.data);
+  }
+
+  // 2) PATCH con "subtext"
+  try {
+    await apiPatch(`/api/non-closing-tasks/${taskId}`, { subtext: rawDesc });
+    return;
+  } catch (e) {
+    console.warn("[Keeper] PATCH subtext falló:", e?.response?.status, e?.response?.data);
+  }
+
+  // 3) PATCH con "notes"
+  try {
+    await apiPatch(`/api/non-closing-tasks/${taskId}`, { notes: rawDesc });
+    return;
+  } catch (e) {
+    console.warn("[Keeper] PATCH notes falló:", e?.response?.status, e?.response?.data);
+  }
+
+  // 4) Como último recurso, crea una nota/comentario asociado a la tarea
+  //    Probamos dos rutas comunes
+  try {
+    await apiPost(`/api/non-closing-tasks/${taskId}/notes`, { text: rawDesc });
+    return;
+  } catch (e) {
+    console.warn("[Keeper] POST task notes (anidado) falló:", e?.response?.status, e?.response?.data);
+  }
+
+  try {
+    await apiPost(`/api/notes`, { taskId, text: rawDesc });
+  } catch (e) {
+    console.warn("[Keeper] POST /api/notes (plano) falló:", e?.response?.status, e?.response?.data);
+  }
+}
+
+/**
+ * Crea una tarea y luego intenta fijar la descripción.
+ * - title => taskName (<=255)
+ * - description => description/subtext/notes (best-effort)
  */
 async function createTask(clientId, assigneeId, title, description, dueDate) {
   const rawTitle = String(title || "").trim();
-  const rawDesc  = String(description || "").trim();
+  const rawDesc = String(description || "").trim();
 
   // Si no hay título, usa la primera línea de la descripción
   const fallbackTitle =
     rawDesc.split(/\r?\n/)[0]?.slice(0, 255) || "Task from Slack";
 
-  // 1) Crear la tarea (mínimos requeridos)
-  const created = await apiPost(`/api/non-closing-tasks`, {
+  const body = {
     clientId: Number(clientId),
     taskName: (rawTitle || fallbackTitle).slice(0, 255),
     assignedTo: assigneeId ? Number(assigneeId) : undefined,
     priority: false,
     dueDate: dueDate || undefined,
-  });
+  };
+  Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
 
-  const taskId = created?.id;
+  const created = await apiPost(`/api/non-closing-tasks`, body);
 
-  // 2) Si hay descripción, intentar guardarla explícitamente por PATCH
-  if (taskId && rawDesc) {
-    try {
-      await apiPatch(`/api/non-closing-tasks/${taskId}`, {
-        description: rawDesc,
-        notes: rawDesc,
-        subtext: rawDesc,
-      });
-    } catch (e) {
-      console.warn(
-        "Keeper PATCH(description) failed:",
-        e?.response?.status || "",
-        e?.response?.data || e.message
-      );
-    }
+  // Intentar fijar/adjuntar la descripción después de crear
+  const taskId = created?.id || created?.taskId || created?.data?.id;
+  try {
+    await tryAttachDescription(taskId, rawDesc);
+  } catch (e) {
+    console.warn("[Keeper] No se pudo adjuntar descripción:", e?.message);
   }
 
   return created;
