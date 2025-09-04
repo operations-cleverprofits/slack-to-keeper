@@ -9,15 +9,47 @@ const receiver = new ExpressReceiver({
 });
 
 // Healthchecks
-receiver.app.get("/", (_req, res) =>
-  res.status(200).send("OK - Slack Keeper Integration")
-);
+receiver.app.get("/", (_req, res) => res.status(200).send("OK - Slack Keeper Integration"));
 receiver.app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
 
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
   receiver,
 });
+
+/** ---------- Utils ---------- */
+// Convierte <@U123|...> a @Display Name para mostrar bonito en el modal (y opcionalmente en Keeper)
+async function expandUserMentionsToNames(text, client) {
+  if (!text) return "";
+  const regex = /<@([A-Z0-9]+)(?:\|[^>]+)?>/g;
+  const ids = [...new Set([...text.matchAll(regex)].map(m => m[1]))];
+  if (ids.length === 0) return text;
+
+  const nameById = {};
+  for (const id of ids) {
+    try {
+      const info = await client.users.info({ user: id });
+      const prof = info?.user?.profile || {};
+      const name =
+        prof.display_name_normalized ||
+        prof.display_name ||
+        info?.user?.real_name ||
+        info?.user?.name ||
+        id;
+      nameById[id] = `@${name}`;
+    } catch { /* ignore */ }
+  }
+  return text.replace(regex, (_m, id) => nameById[id] || `@${id}`);
+}
+
+// Convierte <#C123|canal> a #canal y <!here> etc. a @here (opcional, por estética)
+function tidyOtherMentions(text) {
+  return String(text || "")
+    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, (_m, _id, name) => `#${name}`)
+    .replace(/<!here>/g, "@here")
+    .replace(/<!channel>/g, "@channel")
+    .replace(/<!everyone>/g, "@everyone");
+}
 
 /** ---------- Precarga de clientes (caché) ---------- */
 let cachedClients = [];
@@ -32,56 +64,23 @@ async function preloadClients() {
 preloadClients();
 setInterval(preloadClients, 30 * 60 * 1000);
 
-/** ---------- Helpers ---------- */
-// Reemplaza <@UXXXX> por @Display Name
-async function expandMentionsToNames(text, client) {
-  if (!text) return text;
-  const re = /<@([A-Z0-9]+)>/g;
-  const ids = new Set();
-  let m;
-  while ((m = re.exec(text))) ids.add(m[1]);
-  if (!ids.size) return text;
-
-  const cache = new Map();
-  for (const id of ids) {
-    try {
-      const { user } = await client.users.info({ user: id });
-      const name =
-        user?.profile?.display_name ||
-        user?.real_name ||
-        user?.name ||
-        id;
-      cache.set(id, name);
-    } catch {
-      cache.set(id, id);
-    }
-  }
-
-  let out = text;
-  for (const [id, name] of cache.entries()) {
-    const token = new RegExp(`<@${id}>`, "g");
-    out = out.replace(token, `@${name}`);
-  }
-  return out;
-}
-
 /** ---------- Opciones del external_select (client_action) ---------- */
 slackApp.options("client_action", async (ctx) => {
   const { ack } = ctx;
   try {
     const raw =
-      ctx?.options?.value ?? ctx?.payload?.value ?? (ctx?.body?.value || "");
+      ctx?.options?.value ??
+      ctx?.payload?.value ??
+      (ctx?.body?.value || "");
     const query = String(raw || "").toLowerCase();
 
     if (!cachedClients.length) await preloadClients();
 
     const pool = query
-      ? cachedClients.filter(
-          (c) => c.name && c.name.toLowerCase().includes(query)
-        )
+      ? cachedClients.filter(c => c.name && c.name.toLowerCase().includes(query))
       : cachedClients.slice(0, 50);
 
-    const options = pool.slice(0, 100).map((c) => ({
+    const options = pool.slice(0, 100).map(c => ({
       text: { type: "plain_text", text: c.name },
       value: String(c.id),
     }));
@@ -96,41 +95,30 @@ slackApp.options("client_action", async (ctx) => {
 slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
   await ack();
 
+  // Usuarios para el dropdown
   const users = await getUsers();
 
-  const initialMsg =
+  // Texto original del mensaje de Slack
+  const rawMsg =
     shortcut?.message?.text ||
     shortcut?.message?.blocks?.[0]?.text?.text ||
     "";
 
-  // Obtener permalink + guardar metadatos para el submit
-  const channelId =
-    shortcut?.channel?.id ||
-    shortcut?.message?.channel ||
-    shortcut?.channel_id ||
-    "";
-  const message_ts = shortcut?.message?.ts;
-  const teamId = shortcut?.team?.id || shortcut?.user?.team_id || "";
-
-  let permalink = "";
-  try {
-    if (channelId && message_ts) {
-      const r = await client.chat.getPermalink({ channel: channelId, message_ts });
-      permalink = r?.permalink || "";
-    }
-  } catch (e) {
-    console.warn("No pude obtener permalink:", e?.data?.error || e?.message);
-  }
+  // ⇩⇩ NUEVO: expandir menciones a @Nombre SOLO para mostrar en el modal
+  const prettyMsg = tidyOtherMentions(await expandUserMentionsToNames(rawMsg, client));
 
   await client.views.open({
     trigger_id: shortcut.trigger_id,
     view: {
       type: "modal",
       callback_id: "create_keeper_task",
-      private_metadata: JSON.stringify({ permalink, channelId, message_ts, teamId }),
       title: { type: "plain_text", text: "Send to Keeper" },
       submit: { type: "plain_text", text: "Create Task" },
       close: { type: "plain_text", text: "Cancel" },
+      private_metadata: JSON.stringify({
+        channel: shortcut?.channel?.id || shortcut?.channel?.id,
+        ts: shortcut?.message?.ts,
+      }),
       blocks: [
         {
           type: "input",
@@ -151,7 +139,7 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             type: "static_select",
             action_id: "assignee_action",
             placeholder: { type: "plain_text", text: "Pick a user" },
-            options: users.slice(0, 100).map((u) => ({
+            options: users.slice(0, 100).map(u => ({
               text: { type: "plain_text", text: u.name },
               value: String(u.id),
             })),
@@ -175,7 +163,7 @@ slackApp.shortcut("send_to_keeper", async ({ shortcut, ack, client }) => {
             type: "plain_text_input",
             action_id: "description_action",
             multiline: true,
-            initial_value: initialMsg,
+            initial_value: prettyMsg, // ← ya con @Nombre
           },
         },
         {
@@ -205,47 +193,40 @@ slackApp.view("create_keeper_task", async ({ ack, body, view, client }) => {
 
     const title =
       view.state.values.task_title_block.task_title_action.value;
-    let descriptionRaw =
+
+    // Descripción que escribe la persona (podría tener menciones nuevas)
+    const rawDesc =
       view.state.values.description_block.description_action.value;
+
+    // Bonito con nombres para Keeper
+    const prettyDesc = tidyOtherMentions(await expandUserMentionsToNames(rawDesc, client));
+
+    // Añadir link del mensaje original al final (solo para Keeper)
+    let finalDesc = prettyDesc;
+    try {
+      const meta = JSON.parse(body.view?.private_metadata || "{}");
+      if (meta.channel && meta.ts) {
+        const { permalink } = await client.chat.getPermalink({
+          channel: meta.channel,
+          message_ts: meta.ts,
+        });
+        if (permalink) {
+          finalDesc += `\n\n:link: Slack message: ${permalink}`;
+        }
+      }
+    } catch { /* ignore */ }
+
     const dueDate =
       view.state.values.due_date_block?.due_date_action?.selected_date;
 
-    // Expandir menciones <@U…> -> @Nombre
-    descriptionRaw = await expandMentionsToNames(descriptionRaw, client);
+    await createTask(clientId, assigneeId, title, finalDesc, dueDate);
 
-    // Recuperar metadatos y asegurar permalink
-    let meta = {};
-    try { meta = JSON.parse(body.view?.private_metadata || "{}"); } catch {}
-    let { permalink, channelId, message_ts, teamId } = meta;
-
-    if (!permalink && channelId && message_ts) {
-      try {
-        const r = await client.chat.getPermalink({ channel: channelId, message_ts });
-        permalink = r?.permalink || "";
-      } catch {
-        // Fallback: link al cliente de Slack (no requiere domain)
-        const tsCompact = String(message_ts || "").replace(".", "");
-        if (teamId && channelId && tsCompact) {
-          permalink = `https://app.slack.com/client/${teamId}/${channelId}/p${tsCompact}`;
-        }
-      }
-    }
-
-    const description = permalink
-      ? `${(descriptionRaw || "").trim()}\n\n🔗 Slack message: ${permalink}`
-      : descriptionRaw;
-
-    await createTask(clientId, assigneeId, title, description, dueDate);
-
-    // Aviso ephemeral si hay channelId
     try {
-      if (channelId) {
-        await client.chat.postEphemeral({
-          channel: channelId,
-          user: body.user.id,
-          text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
-        });
-      }
+      await client.chat.postEphemeral({
+        channel: body.user?.id, // si no hay canal del mensaje, mandar al usuario
+        user: body.user.id,
+        text: `✅ Task creada en Keeper (clientId: ${clientId}).`,
+      });
     } catch {}
   } catch (err) {
     console.error("Error creando task en Keeper:", err?.message || err);
